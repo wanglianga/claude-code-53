@@ -1,0 +1,22 @@
+{
+  "name": "ortho-web",
+  "version": "1.0.0",
+  "private": true,
+  "description": "口腔正畸复诊排期与矫治器异常平台 Web",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "next": "14.2.13",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.16.5",
+    "@types/react": "^18.3.8",
+    "@types/react-dom": "^18.3.0",
+    "typescript": "^5.6.2"
+  }
+}

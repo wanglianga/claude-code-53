@@ -1,0 +1,48 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ortho}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ortho_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-ortho}
+      TZ: Asia/Shanghai
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ortho} -d ${POSTGRES_DB:-ortho}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    # 数据库仅内部网络访问，不发布到宿主端口
+
+  api:
+    build: ./api
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ortho}:${POSTGRES_PASSWORD:-ortho_pass}@db:5432/${POSTGRES_DB:-ortho}
+      JWT_SECRET: ${JWT_SECRET:-ortho-dev-secret-change-me}
+      PORT: 4000
+      UPLOAD_DIR: /app/uploads
+      TZ: Asia/Shanghai
+    volumes:
+      - uploads:/app/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    # API 仅内部网络访问，经 web 层 /api 反代对外
+
+  web:
+    build: ./web
+    environment:
+      API_INTERNAL_URL: http://api:4000
+      TZ: Asia/Shanghai
+    ports:
+      - "${CC_PUBLISH_PORT}:3000"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  uploads:

@@ -1,0 +1,400 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  DOCTOR
+  NURSE
+  RECEPTION
+  FINANCE
+  LAB
+}
+
+enum PlanType {
+  INVISIBLE // 隐形矫治
+  FIXED     // 固定托槽
+  PEDIATRIC // 儿童早矫
+}
+
+enum PlanStatus {
+  ACTIVE
+  COMPLETED
+  SWITCHED // 已换方案（历史保留）
+  TERMINATED
+}
+
+enum StageStatus {
+  ACTIVE
+  DONE
+}
+
+enum ImagingType {
+  ORAL_SCAN        // 口扫
+  FACIAL_PHOTO     // 面像
+  XRAY_PANO        // 全景片
+  XRAY_CEPH        // 头颅侧位片
+  CBCT             // CBCT
+  INTRAORAL_PHOTO  // 口内照
+}
+
+enum ApptStatus {
+  SCHEDULED
+  ARRIVED     // 已到诊
+  NURSE_DONE  // 护士核验完成
+  COMPLETED   // 医生结论完成
+  CANCELLED
+  NO_SHOW
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  OVERDUE
+  WAIVED
+}
+
+enum LabOrderType {
+  ALIGNER_BATCH // 矫治器批次
+  RESTART_MAKE  // 重启制作
+  RETAINER      // 保持器
+  REPAIR        // 补制/修理
+}
+
+enum LabOrderStatus {
+  REQUESTED
+  IN_PRODUCTION
+  SHIPPED
+  RECEIVED
+  CANCELLED
+}
+
+enum ExceptionType {
+  PATIENT_DELAY        // 患者临时延期
+  ALIGNER_BROKEN       // 矫治器断裂
+  ALIGNER_LOST         // 牙套丢失
+  ATTACHMENT_REPEATED  // 附件多次脱落
+  MOVEMENT_OFF_TRACK   // 牙齿移动不达标
+  DOCTOR_LEAVE         // 医生请假
+  PAYMENT_OVERDUE      // 付款逾期
+  PLAN_RESTART         // 重启方案
+  OTHER
+}
+
+enum ExceptionStatus {
+  OPEN
+  PROCESSING
+  RESOLVED
+}
+
+model User {
+  id              String   @id @default(cuid())
+  username        String   @unique
+  password        String
+  name            String
+  role            Role
+  active          Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  patientsPrimary Patient[]         @relation("PrimaryDoctor")
+  plans           TreatmentPlan[]   @relation("PlanDoctor")
+  appointments    Appointment[]     @relation("ApptDoctor")
+  schedules       DoctorSchedule[]
+  leaves          DoctorLeave[]
+  nurseVisits     VisitRecord[]     @relation("Nurse")
+  doctorVisits    VisitRecord[]     @relation("Doctor")
+  timeline        TimelineEvent[]
+  exceptionTasks  ExceptionTask[]   @relation("TaskAssignee")
+}
+
+model Chair {
+  id           String        @id @default(cuid())
+  name         String        @unique
+  active       Boolean       @default(true)
+  appointments Appointment[]
+}
+
+model DoctorSchedule {
+  id       String @id @default(cuid())
+  doctorId String
+  doctor   User   @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  weekday  Int // 0=周日 ... 6=周六
+  startMin Int // 分钟数，如 540=09:00
+  endMin   Int
+}
+
+model DoctorLeave {
+  id        String   @id @default(cuid())
+  doctorId  String
+  doctor    User     @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  startDate DateTime
+  endDate   DateTime
+  reason    String?
+  createdAt DateTime @default(now())
+}
+
+model Patient {
+  id              String    @id @default(cuid())
+  mrn             String    @unique // 病历号
+  name            String
+  gender          String
+  birthDate       DateTime?
+  phone           String?
+  address         String?
+  allergy         String?
+  perioStatus     String? // 牙周情况
+  note            String?
+  primaryDoctorId String?
+  primaryDoctor   User?     @relation("PrimaryDoctor", fields: [primaryDoctorId], references: [id])
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  plans           TreatmentPlan[]
+  appointments    Appointment[]
+  imaging         ImagingRecord[]
+  payments        PaymentStage[]
+  exceptions      ExceptionCase[]
+  labOrders       LabOrder[]
+  visits          VisitRecord[]
+  timeline        TimelineEvent[]
+}
+
+model TreatmentPlan {
+  id             String    @id @default(cuid())
+  patientId      String
+  patient        Patient   @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  doctorId       String
+  doctor         User      @relation("PlanDoctor", fields: [doctorId], references: [id])
+  type           PlanType
+  version        Int       @default(1)
+  restartCount   Int       @default(0)
+  parentId       String?
+  parent         TreatmentPlan?  @relation("PlanChain", fields: [parentId], references: [id])
+  children       TreatmentPlan[] @relation("PlanChain")
+  status         PlanStatus @default(ACTIVE)
+  totalAligners  Int? // 矫治器总副数（隐形）
+  currentAligner Int     @default(0)
+  alignerDays    Int? // 每副佩戴天数
+  revisitWeeks   Int     @default(6) // 复诊节奏（周）
+  attachments    Json? // 附件粘接计划 [{tooth, note}]
+  extractions    Json? // 拔牙计划 [{tooth, done}]
+  ipr            Json? // 片切计划 [{tooth, mm}]
+  expectedMonths Int // 预计周期（月）
+  totalFee       Float   @default(0)
+  startDate      DateTime @default(now())
+  expectedEnd    DateTime?
+  switchReason   String?
+  note           String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  stages         TreatmentStage[]
+  appointments   Appointment[]
+  imaging        ImagingRecord[]
+  payments       PaymentStage[]
+  exceptions     ExceptionCase[]
+  labOrders      LabOrder[]
+  visits         VisitRecord[]
+}
+
+// 治疗阶段：患者自述、病历、护士操作、技工发货、收费节点、影像版本均锚定到阶段
+model TreatmentStage {
+  id           String      @id @default(cuid())
+  planId       String
+  plan         TreatmentPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+  seq          Int
+  name         String
+  alignerFrom  Int?
+  alignerTo    Int?
+  status       StageStatus @default(ACTIVE)
+  createdAt    DateTime    @default(now())
+  appointments Appointment[]
+  imaging      ImagingRecord[]
+  payments     PaymentStage[]
+  exceptions   ExceptionCase[]
+  labOrders    LabOrder[]
+  visits       VisitRecord[]
+  timeline     TimelineEvent[]
+  materials    MaterialUsage[]
+}
+
+model Appointment {
+  id           String     @id @default(cuid())
+  patientId    String
+  patient      Patient    @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  planId       String
+  plan         TreatmentPlan @relation(fields: [planId], references: [id])
+  stageId      String?
+  stage        TreatmentStage? @relation(fields: [stageId], references: [id])
+  doctorId     String
+  doctor       User       @relation("ApptDoctor", fields: [doctorId], references: [id])
+  chairId      String?
+  chair        Chair?     @relation(fields: [chairId], references: [id])
+  startAt      DateTime
+  endAt        DateTime
+  type         String     @default("复诊")
+  status       ApptStatus @default(SCHEDULED)
+  note         String? // 患者时间偏好等
+  cancelReason String?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  visit        VisitRecord?
+}
+
+model VisitRecord {
+  id             String      @id @default(cuid())
+  appointmentId  String      @unique
+  appointment    Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+  patientId      String
+  patient        Patient     @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  planId         String
+  plan           TreatmentPlan @relation(fields: [planId], references: [id])
+  stageId        String?
+  stage          TreatmentStage? @relation(fields: [stageId], references: [id])
+  // ---- 护士核验 ----
+  wearHours      Float? // 佩戴时长（小时/天）
+  hygiene        String? // 口腔卫生 GOOD/FAIR/POOR
+  attachmentLost Int     @default(0) // 附件脱落数
+  alignerLost    Boolean @default(false) // 牙套丢失
+  painLevel      Int? // 疼痛 0-10
+  discomfort     String? // 疼痛不适/患者自述
+  paymentChecked Boolean @default(false) // 已核验付款阶段
+  nurseNote      String?
+  nurseId        String?
+  nurse          User?       @relation("Nurse", fields: [nurseId], references: [id])
+  nurseAt        DateTime?
+  // ---- 医生结论 ----
+  movementOk     Boolean? // 牙齿移动是否达标
+  conclusion     String? // 复诊结论/病历
+  advanceAligner Boolean? // 是否进入下一次
+  restart        Boolean? // 是否重启方案
+  needImaging    Boolean? // 是否追加拍片
+  completePlan   Boolean? // 治疗完成进入保持器
+  doctorAdvice   String? // 医嘱
+  doctorId       String?
+  doctor         User?       @relation("Doctor", fields: [doctorId], references: [id])
+  doctorAt       DateTime?
+  materials      MaterialUsage[]
+  createdAt      DateTime    @default(now())
+}
+
+model MaterialUsage {
+  id        String          @id @default(cuid())
+  visitId   String?
+  visit     VisitRecord?    @relation(fields: [visitId], references: [id], onDelete: Cascade)
+  stageId   String?
+  stage     TreatmentStage? @relation(fields: [stageId], references: [id])
+  name      String
+  qty       Float           @default(1)
+  unit      String          @default("件")
+  createdAt DateTime        @default(now())
+}
+
+model ImagingRecord {
+  id         String      @id @default(cuid())
+  patientId  String
+  patient    Patient     @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  planId     String?
+  plan       TreatmentPlan? @relation(fields: [planId], references: [id])
+  stageId    String?
+  stage      TreatmentStage? @relation(fields: [stageId], references: [id])
+  type       ImagingType
+  version    Int         @default(1) // 同类型影像版本号
+  filePath   String?
+  note       String?
+  takenAt    DateTime    @default(now())
+  uploadedBy String?
+  createdAt  DateTime    @default(now())
+}
+
+model PaymentStage {
+  id         String        @id @default(cuid())
+  patientId  String
+  patient    Patient       @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  planId     String
+  plan       TreatmentPlan @relation(fields: [planId], references: [id])
+  stageId    String?
+  stage      TreatmentStage? @relation(fields: [stageId], references: [id])
+  name       String
+  seq        Int           @default(1)
+  amount     Float
+  dueDate    DateTime
+  status     PaymentStatus @default(PENDING)
+  paidAt     DateTime?
+  method     String?
+  operatorId String?
+  createdAt  DateTime      @default(now())
+}
+
+model LabOrder {
+  id          String        @id @default(cuid())
+  patientId   String
+  patient     Patient       @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  planId      String
+  plan        TreatmentPlan @relation(fields: [planId], references: [id])
+  stageId     String?
+  stage       TreatmentStage? @relation(fields: [stageId], references: [id])
+  type        LabOrderType
+  alignerFrom Int?
+  alignerTo   Int?
+  labName     String?
+  trackingNo  String?
+  status      LabOrderStatus @default(REQUESTED)
+  note        String?
+  requestedBy String?
+  requestedAt DateTime       @default(now())
+  shippedAt   DateTime?
+  receivedAt  DateTime?
+}
+
+model ExceptionCase {
+  id            String          @id @default(cuid())
+  patientId     String
+  patient       Patient         @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  planId        String?
+  plan          TreatmentPlan?  @relation(fields: [planId], references: [id])
+  stageId       String?
+  stage         TreatmentStage? @relation(fields: [stageId], references: [id])
+  appointmentId String?
+  type          ExceptionType
+  status        ExceptionStatus @default(OPEN)
+  title         String
+  detail        String?
+  impactDays    Int             @default(0) // 疗程延误评估（天）
+  createdBy     String?
+  resolution    String?
+  createdAt     DateTime        @default(now())
+  resolvedAt    DateTime?
+  tasks         ExceptionTask[]
+}
+
+model ExceptionTask {
+  id           String        @id @default(cuid())
+  exceptionId  String
+  exception    ExceptionCase @relation(fields: [exceptionId], references: [id], onDelete: Cascade)
+  assigneeRole Role
+  assigneeId   String?
+  assignee     User?         @relation("TaskAssignee", fields: [assigneeId], references: [id])
+  note         String
+  done         Boolean       @default(false)
+  doneAt       DateTime?
+  doneBy       String?
+  createdAt    DateTime      @default(now())
+}
+
+model TimelineEvent {
+  id        String          @id @default(cuid())
+  patientId String
+  patient   Patient         @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  stageId   String?
+  stage     TreatmentStage? @relation(fields: [stageId], references: [id])
+  kind      String // 建档/方案/预约/复诊/异常/收费/技工/影像/换方案/转诊
+  title     String
+  detail    String?
+  actorId   String?
+  actor     User?           @relation(fields: [actorId], references: [id])
+  createdAt DateTime        @default(now())
+}
