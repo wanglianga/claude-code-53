@@ -70,9 +70,13 @@ async function main() {
     data: {
       patientId: p1.id, doctorId: drWang.id, type: 'INVISIBLE', version: 1,
       totalAligners: 40, currentAligner: 12, alignerDays: 10, revisitWeeks: 10,
-      attachments: [{ tooth: '14', note: '矩形附件' }, { tooth: '24', note: '矩形附件' }, { tooth: '36', note: '优化附件' }],
+      attachments: [
+        { tooth: '14', note: '矩形附件', bonded: true },
+        { tooth: '24', note: '矩形附件', bonded: true },
+        { tooth: '36', note: '优化附件', bonded: true },
+      ],
       extractions: [],
-      ipr: [{ tooth: '31', mm: 0.3 }, { tooth: '41', mm: 0.3 }],
+      ipr: [{ tooth: '31', mm: 0.3, done: true }, { tooth: '41', mm: 0.3, done: false }],
       expectedMonths: 18, totalFee: 42000, startDate: plan1Start, expectedEnd: months(plan1Start, 18),
       note: '安氏 II 类，牙列拥挤，隐形矫治，先排齐再内收。',
     },
@@ -269,7 +273,7 @@ async function main() {
       patientId: p4.id, doctorId: drWang.id, type: 'INVISIBLE', version: 2, parentId: oldPlan.id,
       totalAligners: 30, currentAligner: 5, alignerDays: 10, revisitWeeks: 8,
       expectedMonths: 14, totalFee: 38000, startDate: plan4Start, expectedEnd: months(plan4Start, 14),
-      attachments: [{ tooth: '13', note: '优化附件' }, { tooth: '23', note: '优化附件' }],
+      attachments: [{ tooth: '13', note: '优化附件', bonded: true }, { tooth: '23', note: '优化附件', bonded: true }],
       note: '由固定托槽方案转入，保留原方案历史判断。',
     },
   });

@@ -1,5 +1,4 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { addDays } from '../../common/date.util';
 import { currentStage } from '../../common/plan.util';
 import { PrismaService } from '../../common/prisma.service';
 import { TimelineService } from '../../common/timeline.service';
@@ -270,11 +269,36 @@ export class VisitsService {
     // 8) 预约完成
     await this.prisma.appointment.update({ where: { id: appointmentId }, data: { status: 'COMPLETED' } });
 
-    // 9) 自动预约下次复诊（完成/重启除外：重启等技工所到件后由前台安排）
+    // 8.1) 处置类预约完成后回写治疗计划项（影响后续智能排期建议）
+    const planPatch: any = {};
+    if (appt.type === '拔牙' && Array.isArray(plan.extractions)) {
+      planPatch.extractions = (plan.extractions as any[]).map((e) => ({ ...e, done: true }));
+    }
+    if (appt.type === '片切' && Array.isArray(plan.ipr)) {
+      planPatch.ipr = (plan.ipr as any[]).map((i) => ({ ...i, done: true }));
+    }
+    if (appt.type === '粘附件' && Array.isArray(plan.attachments)) {
+      planPatch.attachments = (plan.attachments as any[]).map((a) => ({ ...a, bonded: true }));
+    }
+    if (Object.keys(planPatch).length) {
+      await this.prisma.treatmentPlan.update({ where: { id: plan.id }, data: planPatch });
+      await this.timeline.log(appt.patientId, '方案', `临床项执行完成：${appt.type}`, {
+        stageId: stageId || undefined,
+        actorId: user.sub,
+      });
+    }
+
+    // 9) 自动预约下次复诊：类型/时长/节点由临床规则按最新计划推导（完成/重启除外）
     let nextAppointment = null;
     if (!body.completePlan && !body.restart) {
-      const target = addDays(new Date(), (plan.revisitWeeks || 6) * 7);
-      nextAppointment = await this.scheduling.autoBookNext(appt.patientId, target, 30, '复诊', user.sub);
+      const clinical = await this.scheduling.getClinicalContext(appt.patientId);
+      nextAppointment = await this.scheduling.autoBookNext(
+        appt.patientId,
+        clinical.targetDate,
+        clinical.durationMin,
+        clinical.type,
+        user.sub,
+      );
       if (!nextAppointment) {
         createdExceptions.push(
           await this.exceptions.raise({

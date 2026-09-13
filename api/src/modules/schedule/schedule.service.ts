@@ -5,6 +5,7 @@ import { currentStage } from '../../common/plan.util';
 import { PrismaService } from '../../common/prisma.service';
 import { TimelineService } from '../../common/timeline.service';
 import { ExceptionsService } from '../exceptions/exceptions.service';
+import { ClinicalContext, computeClinicalContext } from './clinical.util';
 
 const ACTIVE_STATUSES = ['SCHEDULED', 'ARRIVED', 'NURSE_DONE'] as const;
 
@@ -15,6 +16,41 @@ export class ScheduleService {
     private timeline: TimelineService,
     private exceptions: ExceptionsService,
   ) {}
+
+  /**
+   * 临床上下文：由治疗计划（当前副数/附件/拔牙/片切）推导
+   * 建议预约类型、占用时长与复诊节点。
+   */
+  async getClinicalContext(patientId: string): Promise<ClinicalContext & { doctorId: string }> {
+    const patient = await this.prisma.patient.findUnique({
+      where: { id: patientId },
+      include: { plans: { where: { status: 'ACTIVE' } } },
+    });
+    if (!patient) throw new NotFoundException('患者不存在');
+    const plan = patient.plans[0];
+    if (!plan) throw new BadRequestException('该患者没有在治方案，请先建档制定方案');
+
+    const [lastVisit, labBatches] = await Promise.all([
+      this.prisma.appointment.findFirst({
+        where: { planId: plan.id, status: 'COMPLETED' },
+        orderBy: { startAt: 'desc' },
+        select: { startAt: true },
+      }),
+      this.prisma.labOrder.findMany({
+        where: {
+          planId: plan.id,
+          type: { in: ['ALIGNER_BATCH', 'RESTART_MAKE'] },
+          status: { in: ['SHIPPED', 'RECEIVED'] },
+          alignerTo: { not: null },
+        },
+        select: { alignerTo: true },
+      }),
+    ]);
+    const labMaxAligner = labBatches.length ? Math.max(...labBatches.map((b) => b.alignerTo || 0)) : null;
+    const ctx = computeClinicalContext({ plan, lastVisitAt: lastVisit?.startAt || null, labMaxAligner });
+    return { ...ctx, doctorId: plan.doctorId };
+  }
+
 
   /** 计算某医生在某日期段的可用槽位（考虑排班、请假、既有预约、椅位占用） */
   async suggestSlots(opts: {
@@ -177,20 +213,16 @@ export class ScheduleService {
     return this.book({ patientId, startAt: slots[0].startAt, durationMin, type, actorId });
   }
 
-  /** 患者临时延期：取消原预约 + 立案 + （可选）立即改期 */
+  /** 患者临时延期：先成功订入新时段再取消原预约（避免改期失败丢失原预约） */
   async reschedule(appointmentId: string, newStartAt: Date | null, reason: string, byPatient: boolean, actorId: string) {
     const appt = await this.prisma.appointment.findUnique({ where: { id: appointmentId }, include: { patient: true } });
     if (!appt) throw new NotFoundException('预约不存在');
     if (!['SCHEDULED', 'ARRIVED'].includes(appt.status)) throw new BadRequestException('当前状态不可改期');
     const durationMin = Math.round((appt.endAt.getTime() - appt.startAt.getTime()) / 60000);
 
-    await this.prisma.appointment.update({
-      where: { id: appointmentId },
-      data: { status: 'CANCELLED', cancelReason: `改期：${reason || '患者临时延期'}` },
-    });
-
     let next: Appointment | null = null;
     if (newStartAt) {
+      // 先订新时段；失败则抛错，原预约保持不变
       next = await this.book({
         patientId: appt.patientId,
         startAt: newStartAt,
@@ -200,6 +232,10 @@ export class ScheduleService {
         actorId,
       });
     }
+    await this.prisma.appointment.update({
+      where: { id: appointmentId },
+      data: { status: 'CANCELLED', cancelReason: `改期：${reason || '患者临时延期'}` },
+    });
     const impactDays = newStartAt
       ? Math.max(0, Math.round((newStartAt.getTime() - appt.startAt.getTime()) / 86400000))
       : 0;

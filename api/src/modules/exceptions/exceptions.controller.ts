@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  ForbiddenException,
   Get,
   NotFoundException,
   Param,
@@ -87,8 +88,24 @@ export class ExceptionsController {
     return ex;
   }
 
+  /**
+   * 完成待办任务：仅待办所属角色（或被指定负责人）本人可操作，管理员除外；
+   * 其他角色（如护士操作财务待办）返回 403。
+   */
   @Post(':id/tasks/:taskId/done')
-  async doneTask(@Param('taskId') taskId: string, @CurrentUser() user: any) {
+  async doneTask(@Param('id') id: string, @Param('taskId') taskId: string, @CurrentUser() user: any) {
+    const existing = await this.prisma.exceptionTask.findUnique({
+      where: { id: taskId },
+      include: { exception: true },
+    });
+    if (!existing || existing.exceptionId !== id) throw new NotFoundException('待办任务不存在');
+    const allowed =
+      user.role === 'ADMIN' ||
+      existing.assigneeRole === user.role ||
+      (existing.assigneeId != null && existing.assigneeId === user.sub);
+    if (!allowed) {
+      throw new ForbiddenException('该待办不属于当前角色，无权处理');
+    }
     const task = await this.prisma.exceptionTask.update({
       where: { id: taskId },
       data: { done: true, doneAt: new Date(), doneBy: user.sub },

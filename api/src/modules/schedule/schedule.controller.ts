@@ -147,26 +147,35 @@ export class ScheduleController {
     return { ...a, duePayments };
   }
 
-  /** 智能槽位建议：按方案负责医生 + 出诊 + 椅位 + 患者时间偏好 */
+  /**
+   * 智能槽位建议：先由治疗计划（当前副数/附件/拔牙/片切）推导临床上下文
+   * （预约类型/占用时长/复诊节点），再在节点之后计算可用槽位。
+   * 调用方可显式传 fromDate/durationMin/type 覆盖建议值。
+   */
   @Post('appointments/suggest')
   async suggest(@Body() body: any) {
     if (!body.patientId) throw new BadRequestException('请选择患者');
-    const patient = await this.prisma.patient.findUnique({
-      where: { id: body.patientId },
-      include: { plans: { where: { status: 'ACTIVE' } } },
-    });
-    if (!patient) throw new NotFoundException('患者不存在');
-    const plan = patient.plans[0];
-    if (!plan) throw new BadRequestException('该患者没有在治方案');
+    const clinical = await this.svc.getClinicalContext(body.patientId);
+    const durationMin = Number(body.durationMin) || clinical.durationMin;
+    const fromDate = body.fromDate ? parseDay(body.fromDate) : dayStart(clinical.targetDate);
     const slots = await this.svc.suggestSlots({
-      doctorId: plan.doctorId,
-      fromDate: body.fromDate ? parseDay(body.fromDate) : dayStart(new Date()),
+      doctorId: clinical.doctorId,
+      fromDate,
       days: Math.min(Number(body.days) || 14, 42),
-      durationMin: Number(body.durationMin) || 30,
+      durationMin,
       period: body.period,
       limit: Number(body.limit) || 12,
     });
-    return { doctorId: plan.doctorId, slots };
+    return {
+      doctorId: clinical.doctorId,
+      clinical,
+      applied: {
+        type: body.type || clinical.type,
+        durationMin,
+        fromDate,
+      },
+      slots,
+    };
   }
 
   @Post('appointments')

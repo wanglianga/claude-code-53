@@ -151,13 +151,13 @@ function SchedulePageInner() {
 function SuggestPanel({ presetPatientId, onBooked }: { presetPatientId: string; onBooked: () => void }) {
   const [patientId, setPatientId] = useState(presetPatientId);
   const [patientOptions, setPatientOptions] = useState<any[]>([]);
-  const [fromDate, setFromDate] = useState(todayStr());
+  const [fromDate, setFromDate] = useState('');
   const [period, setPeriod] = useState('');
   const [durationMin, setDurationMin] = useState(30);
   const [type, setType] = useState('复诊');
   const [note, setNote] = useState('');
   const [slots, setSlots] = useState<any[] | null>(null);
-  const [doctorId, setDoctorId] = useState('');
+  const [clinical, setClinical] = useState<any>(null);
   const [error, setError] = useState<any>(null);
   const [ok, setOk] = useState('');
   const [busy, setBusy] = useState(false);
@@ -168,23 +168,30 @@ function SuggestPanel({ presetPatientId, onBooked }: { presetPatientId: string; 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function suggest(pid = patientId) {
+  async function suggest(pid = patientId, override = false) {
     setError(null);
     setOk('');
     setBusy(true);
     try {
-      const res = await api.post('/appointments/suggest', {
-        patientId: pid,
-        fromDate,
-        days: 14,
-        durationMin,
-        period: period || undefined,
-      });
+      // 默认完全按临床规则（节点/类型/时长）；用户手工调整后才带覆盖参数
+      const body: any = { patientId: pid, days: 14 };
+      if (override) {
+        if (fromDate) body.fromDate = fromDate;
+        if (durationMin) body.durationMin = durationMin;
+        if (type) body.type = type;
+        if (period) body.period = period;
+      }
+      const res = await api.post('/appointments/suggest', body);
       setSlots(res.slots);
-      setDoctorId(res.doctorId);
+      setClinical(res.clinical);
+      // 采用临床建议值填充表单（可再手工调整）
+      setType(res.applied.type);
+      setDurationMin(res.applied.durationMin);
+      setFromDate(String(res.applied.fromDate).slice(0, 10));
     } catch (e) {
       setError(e);
       setSlots(null);
+      setClinical(null);
     } finally {
       setBusy(false);
     }
@@ -194,7 +201,7 @@ function SuggestPanel({ presetPatientId, onBooked }: { presetPatientId: string; 
     setError(null);
     try {
       await api.post('/appointments', { patientId, startAt: slot.startAt, durationMin, type, note });
-      setOk(`已预约 ${fmtTime(slot.startAt)}（${slot.chairName}）`);
+      setOk(`已预约 ${fmtTime(slot.startAt)}（${slot.chairName} · ${type} ${durationMin}分钟）`);
       setSlots(null);
       onBooked();
     } catch (e) {
@@ -208,12 +215,21 @@ function SuggestPanel({ presetPatientId, onBooked }: { presetPatientId: string; 
       {ok ? <div className="alert ok">{ok}</div> : null}
       <div className="form-row-3">
         <Field label="患者（仅显示已建方案）" required>
-          <select className="select" value={patientId} onChange={(e) => setPatientId(e.target.value)}>
+          <select
+            className="select"
+            value={patientId}
+            onChange={(e) => {
+              setPatientId(e.target.value);
+              setClinical(null);
+              setSlots(null);
+              if (e.target.value) suggest(e.target.value);
+            }}
+          >
             <option value="">请选择</option>
             {patientOptions.map((p) => <option key={p.id} value={p.id}>{p.name}（{PLAN_TYPE[p.activePlan.type]}）</option>)}
           </select>
         </Field>
-        <Field label="起始日期">
+        <Field label="起始日期（默认按临床节点）">
           <input className="input" type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} />
         </Field>
         <Field label="患者时间偏好">
@@ -221,29 +237,50 @@ function SuggestPanel({ presetPatientId, onBooked }: { presetPatientId: string; 
             <option value="">不限</option><option value="AM">仅上午</option><option value="PM">仅下午</option>
           </select>
         </Field>
-        <Field label="时长（分钟）">
-          <select className="select" value={durationMin} onChange={(e) => setDurationMin(Number(e.target.value))}>
-            <option value={30}>30</option><option value={60}>60</option><option value={90}>90</option>
-          </select>
-        </Field>
-        <Field label="预约类型">
+        <Field label="预约类型（默认按临床建议）">
           <select className="select" value={type} onChange={(e) => setType(e.target.value)}>
             {['复诊', '粘附件', '拔牙', '片切', '重启取模', '保持器交付', '急诊'].map((t) => <option key={t}>{t}</option>)}
+          </select>
+        </Field>
+        <Field label="占用时长（分钟，默认按类型建议）">
+          <select className="select" value={durationMin} onChange={(e) => setDurationMin(Number(e.target.value))}>
+            <option value={30}>30</option><option value={45}>45</option><option value={60}>60</option><option value={90}>90</option>
           </select>
         </Field>
         <Field label="备注（患者时间要求）">
           <input className="input" value={note} onChange={(e) => setNote(e.target.value)} />
         </Field>
       </div>
-      <button className="btn primary" disabled={!patientId || busy} onClick={() => suggest()}>
-        {busy ? '计算中…' : '计算可用槽位（未来 14 天）'}
-      </button>
+      <div className="row">
+        <button className="btn primary" disabled={!patientId || busy} onClick={() => suggest(patientId, true)}>
+          {busy ? '计算中…' : '按当前条件重新计算'}
+        </button>
+        <button className="btn" disabled={!patientId || busy} onClick={() => suggest(patientId, false)}>
+          恢复临床建议值
+        </button>
+      </div>
+
+      {clinical ? (
+        <div className="alert info mt16" style={{ lineHeight: 1.8 }}>
+          <b>临床建议</b>：{clinical.type} · 占用 {clinical.durationMin} 分钟 · 建议节点 {fmtDate(clinical.targetDate)}
+          <br />
+          <span className="small">依据：{clinical.reason}</span>
+          {clinical.pendingItems?.length ? (
+            <div className="mt8">
+              {clinical.pendingItems.map((p: any, i: number) => (
+                <Badge key={i} text={p.label} color="amber" />
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
       {slots ? (
         slots.length === 0 ? (
-          <div className="alert warn mt16">该医生未来 14 天无可用槽位，可扩大日期范围或检查排班/请假。</div>
+          <div className="alert warn mt16">该医生在建议节点后 14 天内无可用槽位，可调整起始日期或检查排班/请假。</div>
         ) : (
           <div className="mt16">
-            <div className="small muted mb8">点击槽位直接预约（自动分配椅位，锁定方案负责医生）：</div>
+            <div className="small muted mb8">点击槽位直接预约（{type} · {durationMin} 分钟 · 锁定方案负责医生 · 自动分配椅位）：</div>
             <div className="slot-grid">
               {slots.map((s, i) => (
                 <div className="slot" key={i} onClick={() => book(s)}>
@@ -435,10 +472,12 @@ function RescheduleModal({ appt, onClose, onDone }: { appt: any; onClose: () => 
   const [reason, setReason] = useState('患者临时延期');
   const [byPatient, setByPatient] = useState(true);
   const [error, setError] = useState<any>(null);
+  // 槽位时长必须与原预约一致，否则临床处置类预约（45/60 分钟）会约不进
+  const durationMin = Math.max(15, Math.round((new Date(appt.endAt).getTime() - new Date(appt.startAt).getTime()) / 60000));
 
   useEffect(() => {
     api
-      .post('/appointments/suggest', { patientId: appt.patient.id, fromDate: todayStr(), days: 14, durationMin: 30 })
+      .post('/appointments/suggest', { patientId: appt.patient.id, fromDate: todayStr(), days: 14, durationMin })
       .then((r) => setSlots(r.slots))
       .catch(setError);
     // eslint-disable-next-line react-hooks/exhaustive-deps
